@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Adaptador de Entrenamientos</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="layout">
+      <header class="topbar">
+        <div class="brand">
+          <img src="{{ url_for('static', filename='brand/logo-metropolitano-argent.png') }}" alt="CrossFit Metropolitano">
+        </div>
+        <div class="topbar-meta">
+          <span class="meta-label">Modelo</span>
+          <strong>{{ model }}</strong>
+        </div>
+      </header>
+
+      <section class="composer card">
+        <div class="section-heading">
+          <h2>Entrenamiento original</h2>
+        </div>
+        <textarea id="workout-input" class="workout-input" placeholder="Pega aqui el entrenamiento completo..."></textarea>
+        <div class="center-picker" aria-label="Centros para generar">
+          {% for center in centers %}
+            <label class="center-option">
+              <input type="checkbox" class="generate-center-checkbox" value="{{ center.id }}" checked>
+              <span>{{ center.name }}</span>
+            </label>
+          {% endfor %}
+        </div>
+        <div class="actions">
+          <button id="generate-button" class="button primary">Generar centros seleccionados</button>
+          <p id="global-message" class="message" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <section class="centers">
+        {% for center in centers %}
+          <article class="card center-card" data-center-id="{{ center.id }}">
+            <div class="section-heading">
+              <div>
+                <h2>{{ center.name }}</h2>
+              </div>
+              <button class="button secondary config-toggle-button" aria-expanded="false">Ver configuracion</button>
+            </div>
+
+            <div class="center-config-panel" hidden>
+              <div class="form-grid">
+                <label>
+                  <span>Nombre</span>
+                  <input data-field="name" value="{{ center.name }}">
+                </label>
+                <label>
+                  <span>Personas por clase</span>
+                  <input data-field="class_size" value="{{ center.class_size }}" placeholder="Ejemplo: 18-22 personas">
+                </label>
+                <label>
+                  <span>Material disponible</span>
+                  <textarea data-field="available_equipment" placeholder="Ejemplo: 12 barras, 16 mancuernas, 10 remos, 8 bikes...">{{ center.available_equipment }}</textarea>
+                </label>
+                <label>
+                  <span>Memoria permanente</span>
+                  <textarea class="feedback-input" data-field="permanent_feedback" placeholder="Ejemplo: no hay cuerda de trepar; priorizar mancuernas si faltan barras; mantener flujo en clases grandes...">{{ center.permanent_feedback }}</textarea>
+                </label>
+              </div>
+
+              <div class="feedback-actions">
+                <button class="button secondary save-center-button">Guardar configuracion</button>
+                <button class="button secondary save-feedback-button">Guardar memoria</button>
+                <button class="button tertiary save-feedback-regenerate-button">Guardar memoria y regenerar</button>
+              </div>
+            </div>
+
+            <div class="output-block">
+              <div class="section-heading">
+                <div>
+                  <h3>Salida final para copiar y pegar</h3>
+                </div>
+                <button class="button tertiary copy-button">Copiar resultado</button>
+              </div>
+              <label class="temporary-block-field">
+                <span>Bloqueo puntual de material (solo esta generacion)</span>
+                <input class="temporary-material-block-input" placeholder="Ejemplo: sin barras y sin anillas en este bloque horario">
+              </label>
+              <textarea class="result-output" spellcheck="false" placeholder="Cuando generes aparecera aqui el entrenamiento adaptado y el briefing.">{% if center.latest_generation %}{{ center.latest_generation.full_output }}{% endif %}</textarea>
+              <p class="message center-message" aria-live="polite">
+                {% if center.latest_generation %}
+                  Ultima generacion guardada: {{ center.latest_generation.created_at }}
+                {% else %}
+                  Sin generaciones guardadas todavia.
+                {% endif %}
+              </p>
+            </div>
+
+            <div class="briefing-block">
+              <div class="section-heading">
+                <div>
+                  <h3>Briefing</h3>
+                </div>
+                <button class="button tertiary copy-briefing-button">Copiar briefing</button>
+              </div>
+              <textarea class="briefing-output" spellcheck="false" placeholder="Cuando generes aparecera aqui el briefing del centro.">{% if center.latest_generation %}{{ center.latest_generation.briefing }}{% endif %}</textarea>
+            </div>
+          </article>
+        {% endfor %}
+      </section>
+    </main>
+
+    <script>
+      window.__BOOTSTRAP__ = {{ {"centers": centers, "model": model}|tojson }};
+    </script>
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </body>
+  </html>

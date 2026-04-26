@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: metropolitano-training-app-staging
+    runtime: python
+    plan: starter
+    autoDeploy: true
+    branch: develop
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers=2 --threads=4 --timeout=120 --bind=0.0.0.0:$PORT app:app
+    disk:
+      name: metropolitano-staging-data
+      mountPath: /opt/render/project/src/instance
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: CLAUDE_MODEL
+        value: claude-sonnet-4-20250514
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+  - type: web
+    name: metropolitano-training-app-production
+    runtime: python
+    plan: starter
+    autoDeploy: true
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers=2 --threads=4 --timeout=120 --bind=0.0.0.0:$PORT app:app
+    disk:
+      name: metropolitano-production-data
+      mountPath: /opt/render/project/src/instance
+      sizeGB: 5
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: CLAUDE_MODEL
+        value: claude-sonnet-4-20250514
+      - key: ANTHROPIC_API_KEY
+        sync: false
