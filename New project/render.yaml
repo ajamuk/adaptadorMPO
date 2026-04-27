@@ -7,10 +7,6 @@ services:
     branch: develop
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn --workers=2 --threads=4 --timeout=120 --bind=0.0.0.0:$PORT app:app
-    disk:
-      name: metropolitano-staging-data
-      mountPath: /opt/render/project/src/instance
-      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -19,6 +15,8 @@ services:
       - key: CLAUDE_MODEL
         value: claude-sonnet-4-20250514
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DATABASE_URL
         sync: false
 
   - type: web
@@ -29,10 +27,6 @@ services:
     branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn --workers=2 --threads=4 --timeout=120 --bind=0.0.0.0:$PORT app:app
-    disk:
-      name: metropolitano-production-data
-      mountPath: /opt/render/project/src/instance
-      sizeGB: 5
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -41,4 +35,6 @@ services:
       - key: CLAUDE_MODEL
         value: claude-sonnet-4-20250514
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DATABASE_URL
         sync: false

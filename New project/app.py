@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
+import psycopg
+from psycopg.rows import dict_row
 from flask import Flask, jsonify, render_template, request as flask_request
 
 
@@ -32,6 +34,8 @@ def load_dotenv() -> None:
 
 load_dotenv()
 DEFAULT_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_POSTGRES = DATABASE_URL.startswith("postgres://") or DATABASE_URL.startswith("postgresql://")
 
 
 def utc_now() -> str:
@@ -42,69 +46,173 @@ app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
 
 
-def get_db() -> sqlite3.Connection:
+def get_db() -> Any:
+    if USE_POSTGRES:
+        return psycopg.connect(DATABASE_URL)
     DATABASE_PATH.parent.mkdir(exist_ok=True)
     connection = sqlite3.connect(DATABASE_PATH)
     connection.row_factory = sqlite3.Row
     return connection
 
 
+def adapt_query(query: str) -> str:
+    if not USE_POSTGRES:
+        return query
+    return query.replace("?", "%s")
+
+
+def fetch_all_from_db(db: Any, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    driver_query = adapt_query(query)
+    if USE_POSTGRES:
+        with db.cursor(row_factory=dict_row) as cur:
+            cur.execute(driver_query, params)
+            return [dict(row) for row in cur.fetchall()]
+    rows = db.execute(driver_query, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_one_from_db(db: Any, query: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+    driver_query = adapt_query(query)
+    if USE_POSTGRES:
+        with db.cursor(row_factory=dict_row) as cur:
+            cur.execute(driver_query, params)
+            row = cur.fetchone()
+            return dict(row) if row else None
+    row = db.execute(driver_query, params).fetchone()
+    return dict(row) if row else None
+
+
+def execute_on_db(db: Any, query: str, params: tuple[Any, ...] = (), want_lastrowid: bool = False) -> int:
+    driver_query = adapt_query(query)
+    if USE_POSTGRES:
+        query_for_exec = driver_query.strip().rstrip(";")
+        if want_lastrowid and re.match(r"(?is)^\s*insert\s+into\s+\w+", query_for_exec) and " returning " not in query_for_exec.lower():
+            query_for_exec = f"{query_for_exec} RETURNING id"
+        with db.cursor(row_factory=dict_row) as cur:
+            cur.execute(query_for_exec, params)
+            if want_lastrowid:
+                row = cur.fetchone()
+                return int(row["id"]) if row else 0
+        return 0
+    cursor = db.execute(driver_query, params)
+    if want_lastrowid:
+        return int(cursor.lastrowid)
+    return 0
+
+
+def get_table_columns_from_db(db: Any, table_name: str) -> set[str]:
+    if USE_POSTGRES:
+        rows = fetch_all_from_db(
+            db,
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = ?
+            """,
+            (table_name,),
+        )
+        return {row["column_name"] for row in rows}
+    rows = db.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row["name"] for row in rows}
+
+
 def query_all(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     with get_db() as db:
-        rows = db.execute(query, params).fetchall()
-    return [dict(row) for row in rows]
+        return fetch_all_from_db(db, query, params)
 
 
 def query_one(query: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
     with get_db() as db:
-        row = db.execute(query, params).fetchone()
-    return dict(row) if row else None
+        return fetch_one_from_db(db, query, params)
 
 
 def execute(query: str, params: tuple[Any, ...] = ()) -> int:
     with get_db() as db:
-        cursor = db.execute(query, params)
+        last_id = execute_on_db(db, query, params, want_lastrowid=True)
         db.commit()
-        return cursor.lastrowid
+        return last_id
 
 
 def init_db() -> None:
     with get_db() as db:
-        db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS centers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                slug TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                class_size TEXT NOT NULL DEFAULT '',
-                available_equipment TEXT NOT NULL DEFAULT '',
-                permanent_feedback TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
+        schema_statements = []
+        if USE_POSTGRES:
+            schema_statements = [
+                """
+                CREATE TABLE IF NOT EXISTS centers (
+                    id BIGSERIAL PRIMARY KEY,
+                    slug TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    class_size TEXT NOT NULL DEFAULT '',
+                    available_equipment TEXT NOT NULL DEFAULT '',
+                    permanent_feedback TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS center_feedback (
+                    id BIGSERIAL PRIMARY KEY,
+                    center_id BIGINT NOT NULL REFERENCES centers(id),
+                    instruction TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS generations (
+                    id BIGSERIAL PRIMARY KEY,
+                    center_id BIGINT NOT NULL REFERENCES centers(id),
+                    source_workout TEXT NOT NULL,
+                    adapted_workout TEXT NOT NULL,
+                    briefing TEXT NOT NULL DEFAULT '',
+                    center_snapshot TEXT NOT NULL,
+                    feedback_snapshot TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """,
+            ]
+        else:
+            schema_statements = [
+                """
+                CREATE TABLE IF NOT EXISTS centers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slug TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    class_size TEXT NOT NULL DEFAULT '',
+                    available_equipment TEXT NOT NULL DEFAULT '',
+                    permanent_feedback TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS center_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    center_id INTEGER NOT NULL,
+                    instruction TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(center_id) REFERENCES centers(id)
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS generations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    center_id INTEGER NOT NULL,
+                    source_workout TEXT NOT NULL,
+                    adapted_workout TEXT NOT NULL,
+                    briefing TEXT NOT NULL DEFAULT '',
+                    center_snapshot TEXT NOT NULL,
+                    feedback_snapshot TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(center_id) REFERENCES centers(id)
+                )
+                """,
+            ]
 
-            CREATE TABLE IF NOT EXISTS center_feedback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                center_id INTEGER NOT NULL,
-                instruction TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(center_id) REFERENCES centers(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS generations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                center_id INTEGER NOT NULL,
-                source_workout TEXT NOT NULL,
-                adapted_workout TEXT NOT NULL,
-                briefing TEXT NOT NULL DEFAULT '',
-                center_snapshot TEXT NOT NULL,
-                feedback_snapshot TEXT NOT NULL,
-                model TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(center_id) REFERENCES centers(id)
-            );
-            """
-        )
+        for statement in schema_statements:
+            execute_on_db(db, statement)
         db.commit()
 
     migrate_center_schema()
@@ -115,7 +223,7 @@ def init_db() -> None:
 
 def migrate_center_schema() -> None:
     with get_db() as db:
-        columns = {row["name"] for row in db.execute("PRAGMA table_info(centers)").fetchall()}
+        columns = get_table_columns_from_db(db, "centers")
         migrations = {
             "class_size": "ALTER TABLE centers ADD COLUMN class_size TEXT NOT NULL DEFAULT ''",
             "available_equipment": "ALTER TABLE centers ADD COLUMN available_equipment TEXT NOT NULL DEFAULT ''",
@@ -124,59 +232,73 @@ def migrate_center_schema() -> None:
         }
         for column, statement in migrations.items():
             if column not in columns:
-                db.execute(statement)
+                execute_on_db(db, statement)
 
-        generation_columns = {
-            row["name"] for row in db.execute("PRAGMA table_info(generations)").fetchall()
-        }
+        generation_columns = get_table_columns_from_db(db, "generations")
         if "briefing" not in generation_columns:
-            db.execute("ALTER TABLE generations ADD COLUMN briefing TEXT NOT NULL DEFAULT ''")
+            execute_on_db(db, "ALTER TABLE generations ADD COLUMN briefing TEXT NOT NULL DEFAULT ''")
 
-        legacy_columns = {
-            row["name"] for row in db.execute("PRAGMA table_info(centers)").fetchall()
-        }
+        legacy_columns = get_table_columns_from_db(db, "centers")
         if "audience" in legacy_columns:
-            db.execute(
-                """
-                UPDATE centers
-                SET class_size = audience
-                WHERE class_size = '' AND audience != ''
-                """
-            )
-        if "facility_notes" in legacy_columns:
-            db.execute(
-                """
-                UPDATE centers
-                SET available_equipment = facility_notes
-                WHERE available_equipment = '' AND facility_notes != ''
-                """
-            )
-        if {"movement_constraints", "coaching_style", "permanent_instructions"}.issubset(legacy_columns):
-            db.execute(
-                """
-                UPDATE centers
-                SET restrictions_priorities =
-                    TRIM(
-                        COALESCE(movement_constraints, '') || CHAR(10) ||
-                        COALESCE(coaching_style, '') || CHAR(10) ||
-                        COALESCE(permanent_instructions, '')
+            rows = fetch_all_from_db(db, "SELECT id, audience, class_size FROM centers")
+            for row in rows:
+                audience = (row.get("audience") or "").strip()
+                class_size = (row.get("class_size") or "").strip()
+                if audience and not class_size:
+                    execute_on_db(
+                        db,
+                        "UPDATE centers SET class_size = ? WHERE id = ?",
+                        (audience, row["id"]),
                     )
-                WHERE restrictions_priorities = ''
-                  AND (
-                    movement_constraints != ''
-                    OR coaching_style != ''
-                    OR permanent_instructions != ''
-                  )
+        if "facility_notes" in legacy_columns:
+            rows = fetch_all_from_db(db, "SELECT id, facility_notes, available_equipment FROM centers")
+            for row in rows:
+                facility_notes = (row.get("facility_notes") or "").strip()
+                available_equipment = (row.get("available_equipment") or "").strip()
+                if facility_notes and not available_equipment:
+                    execute_on_db(
+                        db,
+                        "UPDATE centers SET available_equipment = ? WHERE id = ?",
+                        (facility_notes, row["id"]),
+                    )
+        if {"movement_constraints", "coaching_style", "permanent_instructions"}.issubset(legacy_columns):
+            rows = fetch_all_from_db(
+                db,
                 """
+                SELECT id, movement_constraints, coaching_style, permanent_instructions, restrictions_priorities
+                FROM centers
+                """,
             )
+            for row in rows:
+                current = (row.get("restrictions_priorities") or "").strip()
+                if current:
+                    continue
+                parts = [
+                    (row.get("movement_constraints") or "").strip(),
+                    (row.get("coaching_style") or "").strip(),
+                    (row.get("permanent_instructions") or "").strip(),
+                ]
+                merged = "\n".join([part for part in parts if part]).strip()
+                if merged:
+                    execute_on_db(
+                        db,
+                        "UPDATE centers SET restrictions_priorities = ? WHERE id = ?",
+                        (merged, row["id"]),
+                    )
         if "restrictions_priorities" in legacy_columns:
-            db.execute(
-                """
-                UPDATE centers
-                SET permanent_feedback = restrictions_priorities
-                WHERE permanent_feedback = '' AND restrictions_priorities != ''
-                """
+            rows = fetch_all_from_db(
+                db,
+                "SELECT id, restrictions_priorities, permanent_feedback FROM centers",
             )
+            for row in rows:
+                restrictions_priorities = (row.get("restrictions_priorities") or "").strip()
+                permanent_feedback = (row.get("permanent_feedback") or "").strip()
+                if restrictions_priorities and not permanent_feedback:
+                    execute_on_db(
+                        db,
+                        "UPDATE centers SET permanent_feedback = ? WHERE id = ?",
+                        (restrictions_priorities, row["id"]),
+                    )
         db.commit()
 
 
@@ -212,7 +334,8 @@ def seed_centers() -> None:
 
     with get_db() as db:
         for center in defaults:
-            db.execute(
+            execute_on_db(
+                db,
                 """
                 INSERT INTO centers (
                     slug, name, class_size, available_equipment,
@@ -256,7 +379,8 @@ def normalize_default_centers() -> None:
 
     with get_db() as db:
         for slug, values in defaults.items():
-            db.execute(
+            execute_on_db(
+                db,
                 """
                 UPDATE centers
                 SET class_size = ?, available_equipment = ?,
@@ -280,7 +404,8 @@ def merge_feedback_history_into_permanent_feedback() -> None:
     centers = query_all("SELECT id, permanent_feedback FROM centers ORDER BY id ASC")
     with get_db() as db:
         for center in centers:
-            rows = db.execute(
+            rows = fetch_all_from_db(
+                db,
                 """
                 SELECT instruction
                 FROM center_feedback
@@ -288,7 +413,7 @@ def merge_feedback_history_into_permanent_feedback() -> None:
                 ORDER BY id ASC
                 """,
                 (center["id"],),
-            ).fetchall()
+            )
             memory_lines = [
                 line.strip()
                 for line in center["permanent_feedback"].splitlines()
@@ -303,7 +428,8 @@ def merge_feedback_history_into_permanent_feedback() -> None:
 
             merged_memory = "\n".join(memory_lines)
             if merged_memory != center["permanent_feedback"]:
-                db.execute(
+                execute_on_db(
+                    db,
                     """
                     UPDATE centers
                     SET permanent_feedback = ?, updated_at = ?
@@ -787,6 +913,7 @@ def health():
     return jsonify(
         {
             "ok": True,
+            "db_engine": "postgres" if USE_POSTGRES else "sqlite",
             "database_path": str(DATABASE_PATH),
             "anthropic_api_configured": api_ready,
             "model": DEFAULT_MODEL,

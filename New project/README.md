@@ -26,7 +26,8 @@ Todo queda persistido en `instance/app.db`, de forma que la memoria se conserva 
 - `templates/index.html`: interfaz principal.
 - `static/app.js`: interacciones del frontend.
 - `static/styles.css`: estilos de la interfaz.
-- `instance/app.db`: base de datos SQLite creada automaticamente.
+- `instance/app.db`: base local SQLite (solo para local).
+- `DATABASE_URL` (opcional): si existe, la app usa Postgres (ideal para Render + Supabase).
 
 La integracion con Claude usa la Messages API oficial de Anthropic (`POST /v1/messages`) con `x-api-key` y `anthropic-version: 2023-06-01`.
 
@@ -60,6 +61,7 @@ Edita `.env` y define al menos:
 ```env
 ANTHROPIC_API_KEY=tu_clave
 CLAUDE_MODEL=claude-sonnet-4-20250514
+DATABASE_URL=
 ```
 
 4. Ejecutar la app:
@@ -89,7 +91,7 @@ Este repo ya incluye lo necesario para desplegar en Render:
 - `render.yaml` con dos servicios web:
   - `metropolitano-training-app-staging` (rama `develop`)
   - `metropolitano-training-app-production` (rama `main`)
-- Disco persistente en ambos servicios para mantener `instance/app.db` entre reinicios.
+- Soporte para `DATABASE_URL` (recomendado usar Supabase Postgres en Render free).
 
 ### Paso a paso (una vez)
 
@@ -99,6 +101,7 @@ Este repo ya incluye lo necesario para desplegar en Render:
    - selecciona este repo (detecta `render.yaml`)
 3. Define variable secreta en cada servicio:
    - `ANTHROPIC_API_KEY`
+   - `DATABASE_URL` (URL de Supabase Postgres)
 4. (Opcional recomendado) Asigna dominio propio al servicio de produccion.
 
 ### Flujo de trabajo recomendado
@@ -114,6 +117,12 @@ Este repo ya incluye lo necesario para desplegar en Render:
 ```bash
 ./.venv/bin/pip install -r requirements.txt
 ./.venv/bin/python app.py
+```
+
+Si quieres probar local contra Supabase, exporta:
+
+```bash
+export DATABASE_URL="postgresql://USER:PASSWORD@HOST:6543/postgres?sslmode=require"
 ```
 
 O en modo produccion local:
